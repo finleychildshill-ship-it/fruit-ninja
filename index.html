@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Fruit Ninja</title>
+  <style>
+    body { margin: 0; background: black; overflow: hidden; }
+    canvas { display: block; }
+    #score { position: absolute; top: 20px; right: 20px; color: white; font-size: 36px; font-family: Arial; }
+    #lives { position: absolute; top: 20px; left: 20px; color: red; font-size: 36px; font-family: Arial; }
+    #gameover { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 64px; font-family: Arial; text-align: center; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="score">Score: 0</div>
+  <div id="lives">❤️❤️❤️</div>
+  <div id="gameover">GAME OVER<br><button onclick="restart()" style="font-size:32px;margin-top:20px">Play Again</button></div>
+
+  <script type="module">
+    import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/+esm";
+    const { HandLandmarker, FilesetResolver } = vision;
+
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    let score = 0;
+    let lives = 3;
+    let fruits = [];
+    let particles = [];
+    let fingerTrail = [];
+    let handLandmarker;
+    let video;
+    let gameActive = true;
+    let lastFingerPos = null;
+
+    const FRUITS = [
+      { name: 'watermelon', color: '#2ecc71', inside: '#e74c3c', radius: 40 },
+      { name: 'orange', color: '#e67e22', inside: '#f39c12', radius: 30 },
+      { name: 'apple', color: '#e74c3c', inside: '#fadbd8', radius: 28 },
+      { name: 'lemon', color: '#f1c40f', inside: '#fef9e7', radius: 25 },
+    ];
+
+    function spawnFruit() {
+      const f = FRUITS[Math.floor(Math.random() * FRUITS.length)];
+      const x = Math.random() * (canvas.width - 100) + 50;
+      fruits.push({
+        x, y: canvas.height + 50,
+        vx: (Math.random() - 0.5) * 6,
+        vy: -(Math.random() * 12 + 14),
+        radius: f.radius,
+        color: f.color,
+        inside: f.inside,
+        sliced: false,
+        alpha: 1
+      });
+    }
+
+    function spawnParticles(x, y, color, inside) {
+      for (let i = 0; i < 12; i++) {
+        particles.push({
+          x, y,
+          vx: (Math.random() - 0.5) * 10,
+          vy: (Math.random() - 0.5) * 10,
+          color: Math.random() > 0.5 ? color : inside,
+          radius: Math.random() * 8 + 3,
+          alpha: 1
+        });
+      }
+    }
+
+    function updateLives() {
+      const hearts = ['❤️❤️❤️', '❤️❤️', '❤️', ''][3 - lives];
+      document.getElementById('lives').innerText = hearts || '';
+    }
+
+    window.restart = function() {
+      score = 0;
+      lives = 3;
+      fruits = [];
+      particles = [];
+      fingerTrail = [];
+      gameActive = true;
+      document.getElementById('score').innerText = 'Score: 0';
+      document.getElementById('gameover').style.display = 'none';
+      updateLives();
+    }
+
+    async function setup() {
+      const filesetResolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+      );
+      handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numHands: 1
+      });
+
+      video = document.createElement('video');
+      video.autoplay = true;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      video.play();
+
+      setInterval(spawnFruit, 1200);
+      gameLoop();
+    }
+
+    function gameLoop() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw mirrored camera feed
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      if (!gameActive) { requestAnimationFrame(gameLoop); return; }
+
+      // Hand tracking
+      const results = handLandmarker.detectForVideo(video, performance.now());
+      let fingerX = null, fingerY = null;
+
+      if (results.landmarks && results.landmarks.length > 0) {
+        const lm = results.landmarks[0];
+        // Mirror the x coordinate
+        fingerX = (1 - lm[8].x) * canvas.width;
+        fingerY = lm[8].y * canvas.height;
+
+        fingerTrail.push({ x: fingerX, y: fingerY });
+        if (fingerTrail.length > 12) fingerTrail.shift();
+
+        // Draw finger trail
+        for (let i = 1; i < fingerTrail.length; i++) {
+          ctx.beginPath();
+          ctx.moveTo(fingerTrail[i-1].x, fingerTrail[i-1].y);
+          ctx.lineTo(fingerTrail[i].x, fingerTrail[i].y);
+          ctx.strokeStyle = `rgba(255, 255, 255, ${i / fingerTrail.length})`;
+          ctx.lineWidth = 4;
+          ctx.stroke();
+        }
+
+        // Check slicing
+        if (lastFingerPos) {
+          fruits.forEach(fruit => {
+            if (fruit.sliced) return;
+            const dx = fingerX - fruit.x;
+            const dy = fingerY - fruit.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const speed = Math.sqrt(
+              Math.pow(fingerX - lastFingerPos.x, 2) +
+              Math.pow(fingerY - lastFingerPos.y, 2)
+            );
+            if (dist < fruit.radius && speed > 15) {
+              fruit.sliced = true;
+              score++;
+              document.getElementById('score').innerText = `Score: ${score}`;
+              spawnParticles(fruit.x, fruit.y, fruit.color, fruit.inside);
+            }
+          });
+        }
+        lastFingerPos = { x: fingerX, y: fingerY };
+      } else {
+        fingerTrail = [];
+        lastFingerPos = null;
+      }
+
+      // Update and draw fruits
+      fruits = fruits.filter(fruit => {
+        if (!fruit.sliced) {
+          fruit.x += fruit.vx;
+          fruit.y += fruit.vy;
+          fruit.vy += 0.4;
+
+          // Draw fruit
+          ctx.beginPath();
+          ctx.arc(fruit.x, fruit.y, fruit.radius, 0, Math.PI * 2);
+          ctx.fillStyle = fruit.color;
+          ctx.fill();
+          ctx.strokeStyle = 'white';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          if (fruit.y > canvas.height + 100) {
+            lives--;
+            updateLives();
+            if (lives <= 0) {
+              gameActive = false;
+              document.getElementById('gameover').style.display = 'block';
+            }
+            return false;
+          }
+          return true;
+        } else {
+          fruit.alpha -= 0.05;
+          return fruit.alpha > 0;
+        }
+      });
+
+      // Update and draw particles
+      particles = particles.filter(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.3;
+        p.alpha -= 0.03;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        return p.alpha > 0;
+      });
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    setup();
+  </script>
+</body>
+</html>
